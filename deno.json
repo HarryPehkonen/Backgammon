@@ -1,0 +1,18 @@
+{
+  "tasks": {
+    "test": "deno test",
+    "check": "deno check engine tests"
+  },
+  "fmt": {
+    "lineWidth": 100,
+    "useTabs": false,
+    "indentWidth": 2,
+    "semiColons": true,
+    "singleQuote": false
+  },
+  "lint": {
+    "rules": {
+      "tags": ["recommended"]
+    }
+  }
+}
