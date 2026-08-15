@@ -227,10 +227,11 @@ web/
 
 ### Deployment
 
-The app is deployed as static files behind Caddy at **https://harrisbackgammon.ca** (same VPS and
-Caddy instance as harrisnotes.ca). The production server is a ~100-line Deno static file server
-(`server/serve.ts` on the VPS, not in this repo) running as a systemd unit on `127.0.0.1:8001`;
-Caddy terminates TLS and reverse-proxies to it.
+The app is deployed as static files served directly by Caddy at
+**https://harrisbackgammon.ca** (same Caddy instance as harrisnotes.ca). Caddy
+terminates TLS and serves `/opt/Backgammon/web/dist` with its built-in
+`file_server` — no application server, no systemd unit, nothing to keep
+alive. The site block mirrors harrisnotes.ca's security headers.
 
 To deploy a new build:
 
@@ -240,8 +241,11 @@ ssh notes-server 'export PATH="$HOME/.local/share/mise/shims:$PATH" && \
   npm ci && npm run build'
 ```
 
-The systemd unit serves `web/dist` directly, so a rebuild is enough — no restart needed. The VPS
-has its own GitHub deploy key, so `git pull` works without extra credentials.
+Caddy serves `web/dist` directly, so a rebuild is enough — no restart needed.
+The VPS has its own GitHub deploy key, so `git pull` works without extra
+credentials. (A previous incarnation used a Deno static server on
+127.0.0.1:8001; that was removed in favour of Caddy's file_server — the
+app is static, so no app server is needed.)
 
 ## Notes on the spec
 
