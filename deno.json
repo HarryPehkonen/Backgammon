@@ -1,4 +1,5 @@
 {
+  "exclude": ["web"],
   "tasks": {
     "test": "deno test",
     "check": "deno check engine tests"

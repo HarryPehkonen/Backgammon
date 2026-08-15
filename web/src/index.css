@@ -1,0 +1,21 @@
+/*
+ * Page-level styling only. Everything to do with the board itself lives in the
+ * component's own shadow styles, where it cannot leak.
+ */
+
+:root {
+  color-scheme: dark;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  margin: 0;
+  min-height: 100svh;
+  min-width: 320px;
+  background:
+    radial-gradient(1200px 600px at 50% -10%, #253022, transparent),
+    #0d100c;
+  color: #e8e2d6;
+}
