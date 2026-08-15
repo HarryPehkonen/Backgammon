@@ -5,8 +5,16 @@
  * tested directly; all this file needs to prove is that the component wires
  * those two to a real shadow DOM — that the furniture is on the table and
  * that a click reaches the controller.
+ *
+ * The exception is the handling a player *feels* rather than reads: putting a
+ * half-picked-up checker back, and asking the engine for a hint. Those live
+ * only in the element, so they are pinned down here.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { chooseMove } from "../../engine/ai.ts";
+import { initialBoard, makeBoard } from "../../engine/board.ts";
+import { describeSequence } from "../../engine/moves.ts";
+import { type Board, type Roll, WHITE } from "../../engine/types.ts";
 import { BackgammonBoard } from "./backgammon-board.ts";
 import { TurnController } from "./controller.ts";
 
@@ -18,9 +26,68 @@ async function mount(): Promise<BackgammonBoard> {
   return element;
 }
 
+/**
+ * The element's own state, reachable for a test.
+ *
+ * TypeScript's `private` is a compile-time fiction, so a test may hand the
+ * element a rigged controller — the only way to put a known position and a
+ * known roll in front of the UI, since the element makes its own game.
+ */
+interface Internals {
+  controller: TurnController;
+  thinking: boolean;
+}
+
+function internals(element: BackgammonBoard): Internals {
+  return element as unknown as Internals;
+}
+
+/** A board mounted on a known position, with a known roll already thrown. */
+async function mountWithRoll(board: Board, roll: Roll): Promise<BackgammonBoard> {
+  const element = await mount();
+  internals(element).controller = new TurnController({
+    board,
+    player: WHITE,
+    roller: () => ({ ...roll }),
+  });
+  controlButton(element, ".roll-button").click();
+  await element.updateComplete;
+  return element;
+}
+
 /** Everything matching a selector inside the element's shadow root. */
 function shadowAll(element: BackgammonBoard, selector: string): Element[] {
   return [...element.shadowRoot!.querySelectorAll(selector)];
+}
+
+function shadow(element: BackgammonBoard, selector: string): HTMLElement {
+  const found = element.shadowRoot!.querySelector<HTMLElement>(selector);
+  expect(found, `no ${selector} in the shadow root`).not.toBeNull();
+  return found!;
+}
+
+function controlButton(element: BackgammonBoard, selector: string): HTMLButtonElement {
+  return shadow(element, selector) as HTMLButtonElement;
+}
+
+/** The one-line prompt under the board. */
+function status(element: BackgammonBoard): string {
+  return shadow(element, ".status").textContent ?? "";
+}
+
+/** The engine point a highlighted slot stands for, read back off its title. */
+function pointsOf(element: BackgammonBoard, selector: string): number[] {
+  return shadowAll(element, selector)
+    .map((slot) => Number(slot.getAttribute("title")!.replace("point ", "")));
+}
+
+/** Picks up the first checker the board is offering. */
+async function pickUpFirstChecker(element: BackgammonBoard): Promise<HTMLElement> {
+  const source = shadowAll(element, ".point.pickable")[0] as HTMLElement;
+  expect(source, "the position offers nothing to pick up").toBeDefined();
+  source.click();
+  await element.updateComplete;
+  return source;
 }
 
 afterEach(() => {
@@ -58,5 +125,160 @@ describe("<backgammon-board>", () => {
 
     expect(rolled).toHaveBeenCalledTimes(1);
     expect(shadowAll(element, ".die")).toHaveLength(2);
+  });
+});
+
+/** The opening roll these tests play with: a real 3-1, with a known best play. */
+const OPENING_ROLL: Roll = { a: 3, b: 1 };
+
+describe("putting a checker back", () => {
+  it("drops the selection when Escape is pressed", async () => {
+    const element = await mountWithRoll(initialBoard(), OPENING_ROLL);
+    const played = vi.spyOn(TurnController.prototype, "applyMove");
+
+    await pickUpFirstChecker(element);
+    expect(shadowAll(element, ".selected")).toHaveLength(1);
+    expect(shadowAll(element, ".target").length).toBeGreaterThan(0);
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await element.updateComplete;
+
+    expect(shadowAll(element, ".selected")).toHaveLength(0);
+    expect(shadowAll(element, ".target")).toHaveLength(0);
+    expect(status(element)).toBe("Pick a checker.");
+    expect(played).not.toHaveBeenCalled();
+  });
+
+  it("ignores Escape when nothing has been picked up", async () => {
+    const element = await mountWithRoll(initialBoard(), OPENING_ROLL);
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await element.updateComplete;
+
+    expect(status(element)).toBe("Pick a checker.");
+    expect(shadowAll(element, ".point.pickable").length).toBeGreaterThan(0);
+  });
+
+  it("toggles the selection off when the same point is clicked again", async () => {
+    const element = await mountWithRoll(initialBoard(), OPENING_ROLL);
+    const played = vi.spyOn(TurnController.prototype, "applyMove");
+
+    const source = await pickUpFirstChecker(element);
+    expect(shadowAll(element, ".selected")).toHaveLength(1);
+
+    source.click();
+    await element.updateComplete;
+
+    expect(shadowAll(element, ".selected")).toHaveLength(0);
+    expect(shadowAll(element, ".target")).toHaveLength(0);
+    expect(status(element)).toBe("Pick a checker.");
+    expect(played).not.toHaveBeenCalled();
+  });
+});
+
+describe("the hint button", () => {
+  it("highlights the play the engine would make for White", async () => {
+    const element = await mountWithRoll(initialBoard(), OPENING_ROLL);
+    const advice = chooseMove(initialBoard(), WHITE, OPENING_ROLL)!;
+    const first = advice.moves[0];
+
+    controlButton(element, ".hint-button").click();
+    await element.updateComplete;
+
+    expect(pointsOf(element, ".point.selected")).toEqual([first.from]);
+    expect(pointsOf(element, ".point.target")).toEqual([first.to]);
+    expect(status(element)).toContain("suggested play");
+  });
+
+  it("prints the engine's reasoning in the tutor panel", async () => {
+    const element = await mountWithRoll(initialBoard(), OPENING_ROLL);
+    const advice = chooseMove(initialBoard(), WHITE, OPENING_ROLL)!;
+
+    controlButton(element, ".hint-button").click();
+    await element.updateComplete;
+
+    const text = shadow(element, ".hint-text").textContent ?? "";
+    expect(text).toContain("White rolls (3,1)");
+    expect(text).toContain(describeSequence(advice));
+    // The panel still explains Black's play as well — the hint is an addition.
+    expect(shadowAll(element, ".tutor")).toHaveLength(2);
+  });
+
+  it("lets the player accept the hint by clicking the highlighted point", async () => {
+    const element = await mountWithRoll(initialBoard(), OPENING_ROLL);
+    const advice = chooseMove(initialBoard(), WHITE, OPENING_ROLL)!;
+    const first = advice.moves[0];
+    const played = vi.spyOn(TurnController.prototype, "applyMove");
+
+    controlButton(element, ".hint-button").click();
+    await element.updateComplete;
+    shadow(element, ".point.target").click();
+    await element.updateComplete;
+
+    expect(played).toHaveBeenCalledWith(first.from, first.to);
+  });
+
+  it("keeps the hint on screen after the selection is cancelled", async () => {
+    const element = await mountWithRoll(initialBoard(), OPENING_ROLL);
+
+    controlButton(element, ".hint-button").click();
+    await element.updateComplete;
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await element.updateComplete;
+
+    expect(shadowAll(element, ".selected")).toHaveLength(0);
+    expect(shadow(element, ".hint-text").textContent).toContain("White rolls (3,1)");
+  });
+
+  it("forgets the hint on the next roll", async () => {
+    const element = await mountWithRoll(initialBoard(), OPENING_ROLL);
+
+    controlButton(element, ".hint-button").click();
+    await element.updateComplete;
+    expect(shadowAll(element, ".hint-text")).toHaveLength(1);
+
+    // Straight back to the top of a turn: a fresh roll wipes stale advice.
+    // The controller swap needs a render of its own, or the roll button is
+    // still drawn disabled from the roll that is being replaced.
+    internals(element).controller = new TurnController({
+      board: initialBoard(),
+      player: WHITE,
+      roller: () => ({ ...OPENING_ROLL }),
+    });
+    element.requestUpdate();
+    await element.updateComplete;
+
+    controlButton(element, ".roll-button").click();
+    await element.updateComplete;
+
+    expect(shadowAll(element, ".hint-text")).toHaveLength(0);
+  });
+
+  it("is disabled until the dice have been thrown", async () => {
+    const element = await mount();
+    expect(controlButton(element, ".hint-button").disabled).toBe(true);
+  });
+
+  it("is disabled while Black is thinking", async () => {
+    const element = await mountWithRoll(initialBoard(), OPENING_ROLL);
+    expect(controlButton(element, ".hint-button").disabled).toBe(false);
+
+    internals(element).thinking = true;
+    await element.updateComplete;
+
+    expect(controlButton(element, ".hint-button").disabled).toBe(true);
+  });
+
+  it("is disabled once the game has been won", async () => {
+    // White's last checker sits one pip from home; a 1 bears it off and wins.
+    const finish = makeBoard({ points: { 23: 1, 0: -2 }, whiteOff: 14 });
+    const element = await mountWithRoll(finish, { a: 1, b: 1 });
+
+    await pickUpFirstChecker(element);
+    shadow(element, ".tray.target").click();
+    await element.updateComplete;
+
+    expect(shadow(element, ".banner").textContent).toContain("White wins");
+    expect(controlButton(element, ".hint-button").disabled).toBe(true);
   });
 });

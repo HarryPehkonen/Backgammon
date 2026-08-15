@@ -10,6 +10,9 @@
  * engine's `describeChoice` block is printed verbatim: the play it picked, the
  * plays it rejected, and the scored reasons for each. That is the whole reason
  * this AI is a transparent one-ply evaluator rather than a black box.
+ *
+ * The Hint button turns that same machinery around and points it at the
+ * player's own roll, which is the difference between an opponent and a tutor.
  */
 
 import { css, html, LitElement, nothing, type TemplateResult } from "lit";
@@ -90,6 +93,12 @@ export class BackgammonBoard extends LitElement {
   /** The engine's explanation of Black's last play, printed verbatim. */
   @state() private tutorText = "";
 
+  /**
+   * The engine's explanation of how *White* should play the roll in hand, set
+   * by the Hint button and empty the rest of the time.
+   */
+  @state() private hintText = "";
+
   /** What White has played so far this turn, in `13/7 8/7` notation. */
   @state() private humanMoveText = "";
 
@@ -105,8 +114,27 @@ export class BackgammonBoard extends LitElement {
   /** Handle for the pending AI move, cleared if the element goes away. */
   private aiTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /**
+   * Escape puts a picked-up checker back down.
+   *
+   * It listens on the window rather than on the element because a player who
+   * has just clicked a point has not necessarily left focus anywhere useful,
+   * and "Escape means cancel" is a promise the whole page should keep. Bound
+   * once, as a field, so it can be removed again by identity.
+   */
+  private readonly onKeyDown = (event: KeyboardEvent): void => {
+    if (event.key !== "Escape" || this.selected === null) return;
+    this.cancelSelection();
+  };
+
+  override connectedCallback(): void {
+    super.connectedCallback();
+    window.addEventListener("keydown", this.onKeyDown);
+  }
+
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    window.removeEventListener("keydown", this.onKeyDown);
     this.cancelAiTurn();
   }
 
@@ -125,6 +153,8 @@ export class BackgammonBoard extends LitElement {
     this.selected = null;
     this.destinations = [];
     this.humanMoveText = "";
+    // Advice about the previous roll is worse than no advice at all.
+    this.hintText = "";
 
     if (this.controller.hasLegalMoves()) {
       this.status = "Pick a checker.";
@@ -150,6 +180,13 @@ export class BackgammonBoard extends LitElement {
   private onSlot(slot: number): void {
     if (!this.humanCanAct || this.controller.currentRoll() === null) return;
 
+    // Clicking the checker you just picked up puts it back where it was —
+    // the mouse equivalent of Escape, and the first thing a player tries.
+    if (this.selected === slot) {
+      this.cancelSelection();
+      return;
+    }
+
     if (this.selected !== null && this.destinations.includes(slot)) {
       this.playHumanMove(this.selected, slot);
       return;
@@ -163,10 +200,24 @@ export class BackgammonBoard extends LitElement {
       : "That checker has nowhere to go — pick another.";
   }
 
+  /**
+   * Puts a half-made move back: nothing is in hand, nothing is highlighted,
+   * and the board is waiting for a checker again.
+   *
+   * A hint deliberately survives this. It is reference material about the
+   * roll, not about the checker that was just put down.
+   */
+  private cancelSelection(): void {
+    this.selected = null;
+    this.destinations = [];
+    this.status = "Pick a checker.";
+  }
+
   private playHumanMove(from: number, to: number): void {
     this.controller.applyMove(from, to);
     this.selected = null;
     this.destinations = [];
+    this.hintText = "";
     this.humanMoveText = describeSequence({ moves: this.controller.turnMoves() });
 
     if (this.controller.winner() !== null) {
@@ -182,6 +233,48 @@ export class BackgammonBoard extends LitElement {
 
     this.status = "Pick a checker.";
     this.requestUpdate();
+  }
+
+  /**
+   * Whether asking for a hint would mean anything: White is on turn with dice
+   * in hand and something legal to do with them.
+   */
+  private get canHint(): boolean {
+    return this.humanCanAct && this.controller.currentRoll() !== null &&
+      this.controller.hasLegalMoves();
+  }
+
+  /**
+   * The tutor's answer to "what would you do here?".
+   *
+   * The engine is asked to play White's roll exactly as it plays its own, and
+   * the reasoning is printed the same way — the play it would choose, the
+   * plays it would reject, and the score behind each. The recommendation is
+   * then loaded into the ordinary selection, so accepting it is just clicking
+   * the highlighted point and ignoring it costs nothing.
+   */
+  private onHint(): void {
+    if (!this.canHint) return;
+
+    const roll = this.controller.currentRoll();
+    if (roll === null) return;
+
+    const before = cloneBoard(this.controller.board());
+    const sequence = chooseMove(before, WHITE, roll);
+    if (sequence === null) return;
+
+    // Normally this is the sequence's first move. Half-way through a turn the
+    // advice is still worked out from the whole roll, so its opening leg can
+    // need a die that has already been spent; in that case highlight the
+    // first leg the board is actually offering rather than an illegal one.
+    const suggested = sequence.moves.find((move) =>
+      this.controller.legalDestinations(move.from).includes(move.to)
+    );
+
+    this.hintText = describeChoice(before, WHITE, roll, TUTOR_ALTERNATIVES);
+    this.selected = suggested ? suggested.from : null;
+    this.destinations = suggested ? [suggested.to] : [];
+    if (suggested) this.status = "Here's a suggested play — try it or pick your own.";
   }
 
   /** Passes the dice to Black and schedules its reply. */
@@ -234,6 +327,7 @@ export class BackgammonBoard extends LitElement {
     this.selected = null;
     this.destinations = [];
     this.tutorText = "";
+    this.hintText = "";
     this.humanMoveText = "";
     this.blackMoveText = "";
     this.thinking = false;
@@ -262,7 +356,7 @@ export class BackgammonBoard extends LitElement {
           ${this.renderBar(sources)} ${this.renderTray(BLACK)} ${this.renderTray(WHITE)}
         </div>
 
-        ${this.renderControls(winner)} ${this.renderTutor()}
+        ${this.renderControls(winner)} ${this.renderHint()} ${this.renderTutor()}
       </div>
     `;
   }
@@ -398,6 +492,14 @@ export class BackgammonBoard extends LitElement {
           <button class="roll-button" ?disabled=${!canRoll} @click=${this.onRoll}>
             Roll dice
           </button>
+          <button
+            class="hint-button"
+            ?disabled=${!this.canHint}
+            title="Ask the engine how it would play this roll"
+            @click=${this.onHint}
+          >
+            Hint
+          </button>
           <button class="new-game" @click=${this.onNewGame}>New game</button>
         </div>
 
@@ -438,6 +540,25 @@ export class BackgammonBoard extends LitElement {
             html`<span class="pip" style="grid-row: ${row}; grid-column: ${column};"></span>`,
         )}
       </div>
+    `;
+  }
+
+  /**
+   * The hint panel: the engine's reasoning about the roll the player is
+   * holding, in the same format it uses for its own moves.
+   *
+   * It only exists once a hint has been asked for. An unasked-for answer on
+   * screen at all times would just be a solver, and the player would stop
+   * thinking.
+   */
+  private renderHint(): TemplateResult | typeof nothing {
+    if (!this.hintText) return nothing;
+
+    return html`
+      <section class="tutor hint">
+        <h2>Hint: how I would play it</h2>
+        <pre class="tutor-text hint-text">${this.hintText}</pre>
+      </section>
     `;
   }
 
@@ -809,6 +930,17 @@ export class BackgammonBoard extends LitElement {
       border: 1px solid #2c3327;
       border-radius: 8px;
       padding: 0.9rem 1.1rem;
+    }
+
+    /* The hint says the same kind of thing about your roll, so it looks the
+       same — but it is advice, not commentary, so it wears the accent. */
+    .tutor.hint {
+      border-color: var(--accent);
+    }
+
+    .tutor.hint h2 {
+      color: var(--accent);
+      opacity: 0.95;
     }
 
     .tutor h2 {
