@@ -1,11 +1,14 @@
 # Backgammon
 
-A complete backgammon rules engine in pure TypeScript. No UI, no dependencies, no network — just the
-rules, an explainable position evaluator, and a small AI that plays through them.
+A complete backgammon rules engine in pure TypeScript — no dependencies, no network — plus a
+playable web app. The engine implements the rules with an explainable position evaluator and a
+small AI that plays through them; the web UI lets you play against that AI and learn from its
+reasoning.
 
 The engine is written to be _read_. Functions are named after the rule they implement, and the
 evaluator reports why it liked a move, so you can learn the game from the code and from the AI's
-explanations.
+explanations. The web app puts the AI's explanations on screen: every move Black makes is
+followed by a breakdown of why, and a Hint button does the same for your own roll.
 
 ## Running the tests
 
@@ -17,6 +20,8 @@ deno task check     # type-check engine and tests
 
 Requires Deno 2.x. Nothing is fetched over the network; even the assertion helpers
 (`tests/assert.ts`) are local.
+
+The web app has its own suite (vitest) — see [Web app](#web-app) below.
 
 ## Layout
 
@@ -30,7 +35,11 @@ engine/
 ├── ai.ts         # picks and explains a turn
 └── game.ts       # the Game class: turn cycle, forfeits, winner
 tests/            # one test file per module, plus local assert helpers
+web/              # the playable web app (Vite + Lit + vitest) — see below
 ```
+
+The web app lives in `web/` and imports the engine directly; `deno.json` excludes `web/` so the
+Deno test suite stays engine-only.
 
 ## Board representation
 
@@ -167,6 +176,72 @@ game.playToEnd(); // AI against AI, returns the history
 `Game` owns the roll-then-move cycle and enforces it: you cannot roll twice, or move before rolling,
 or play on after someone has won. Illegal plays are rejected without changing the game. A roll with
 no legal play is recorded as a forfeit and the dice pass.
+
+## Web app
+
+A playable single-page game in `web/` — Vite + Lit + TypeScript, no backend. You play White against
+the engine's AI (Black) in the browser, with the engine's reasoning on screen.
+
+### Features
+
+- **Board**: the full 28-slot position rendered with checker stacks, bar, trays and pip counts.
+- **Click-to-move**: pick up a checker, click the highlighted destination (or the bar/tray) to
+  play; **Escape** or clicking the same checker again cancels the pick-up.
+- **Tutor panel**: after every Black move, the engine's `describeChoice` breakdown appears — the
+  play it chose, the plays it rejected, and the per-factor scores. Alternatives collapse to a
+  "why" diff: only the factors that differ from the chosen play, with `better:`/`worse:` labels.
+- **Hint button**: asks the engine to suggest White's play — highlights the recommended checker
+  and destination and prints the same `describeChoice` reasoning, so you can see what the AI would
+  do (and why) before deciding yourself.
+- **New game**: asks for confirmation if a game is in progress.
+
+### Running
+
+```sh
+export PATH="$HOME/.local/share/mise/shims:$PATH"   # Node 24 LTS via mise
+cd web
+npm install
+npm run dev        # dev server with hot reload
+npm test           # vitest suite (controller, layout, compare, board)
+npm run build      # tsc + vite build → dist/
+npm run preview    # serve the production build
+```
+
+Requires Node 24 LTS (pinned in `mise.toml` at the repo root). The build output is static — the
+engine runs entirely in the browser.
+
+### Layout
+
+```
+web/
+├── index.html            # entry, loads main.ts
+├── src/
+│   ├── main.ts           # app bootstrap
+│   ├── backgammon-board.ts  # the Lit board element: rendering, clicks, AI turns
+│   ├── controller.ts     # TurnController: step-by-step legal moves for click play
+│   ├── layout.ts         # engine point → CSS grid mapping
+│   ├── compare.ts        # evaluation diffing for the tutor "why" view
+│   └── *.test.ts         # vitest suites (happy-dom)
+└── package.json
+```
+
+### Deployment
+
+The app is deployed as static files behind Caddy at **https://harrisbackgammon.ca** (same VPS and
+Caddy instance as harrisnotes.ca). The production server is a ~100-line Deno static file server
+(`server/serve.ts` on the VPS, not in this repo) running as a systemd unit on `127.0.0.1:8001`;
+Caddy terminates TLS and reverse-proxies to it.
+
+To deploy a new build:
+
+```sh
+ssh notes-server 'export PATH="$HOME/.local/share/mise/shims:$PATH" && \
+  cd /opt/Backgammon && git pull origin main && cd web && \
+  npm ci && npm run build'
+```
+
+The systemd unit serves `web/dist` directly, so a rebuild is enough — no restart needed. The VPS
+has its own GitHub deploy key, so `git pull` works without extra credentials.
 
 ## Notes on the spec
 
