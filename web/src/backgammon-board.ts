@@ -6,10 +6,11 @@
  * `layout.ts`, where it is tested directly. What is left here is the part a
  * test cannot really judge anyway: drawing, clicking and timing.
  *
- * The point of the app is the tutor panel. After every move Black makes, the
- * engine's `describeChoice` block is printed verbatim: the play it picked, the
- * plays it rejected, and the scored reasons for each. That is the whole reason
- * this AI is a transparent one-ply evaluator rather than a black box.
+ * The point of the app is the tutor panel. After every move Black makes it
+ * shows the play the engine picked with its full reasoning, and then, for each
+ * play it rejected, only what that play would have done differently. That is
+ * the whole reason this AI is a transparent one-ply evaluator rather than a
+ * black box.
  *
  * The Hint button turns that same machinery around and points it at the
  * player's own roll, which is the difference between an opponent and a tutor.
@@ -18,8 +19,9 @@
 import { css, html, LitElement, nothing, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { classMap } from "lit/directives/class-map.js";
-import { chooseMove, describeChoice } from "../../engine/ai.ts";
+import { chooseMove, explainMove, type RankedMove } from "../../engine/ai.ts";
 import { cloneBoard } from "../../engine/board.ts";
+import { explainEvaluation } from "../../engine/evaluator.ts";
 import { describeSequence } from "../../engine/moves.ts";
 import {
   BAR,
@@ -30,10 +32,12 @@ import {
   OFF,
   type Player,
   playerName,
+  type Roll,
   WHITE,
   WHITE_BAR,
   WHITE_OFF,
 } from "../../engine/types.ts";
+import { diffEvaluations, formatDelta } from "./compare.ts";
 import { TurnController } from "./controller.ts";
 import {
   BAR_COLUMN,
@@ -76,6 +80,63 @@ const DIE_FACES: ReadonlyArray<ReadonlyArray<readonly [number, number]>> = [
   [[1, 1], [1, 3], [2, 1], [2, 3], [3, 1], [3, 3]],
 ];
 
+/** A roll the engine was asked about, together with the plays it ranked. */
+interface Advice {
+  /** Whose roll it was — the panels explain Black's play and White's alike. */
+  player: Player;
+  roll: Roll;
+  /** Best first, as {@link explainMove} returns them; empty if nothing is legal. */
+  moves: RankedMove[];
+}
+
+/**
+ * The tutor's block of text: one play explained in full, the rest explained by
+ * subtraction.
+ *
+ * Only the best play gets the whole breakdown, because it is the reference the
+ * others are read against. Repeating all eight factors for every rejected play
+ * would say the same thing three more times and bury the two lines that
+ * actually decided the choice.
+ */
+function describeAdvice(advice: Advice): string {
+  const header = `${playerName(advice.player)} rolls (${advice.roll.a},${advice.roll.b})`;
+  const [best, ...rejected] = advice.moves;
+  if (!best) return `${header}: no legal move, turn forfeited`;
+
+  const lines = [
+    header,
+    `plays ${describeSequence(best.sequence)}`,
+    ...explainEvaluation(best.evaluation).map((line) => `  ${line}`),
+  ];
+
+  for (const alternative of rejected) {
+    lines.push(describeRejected(best, alternative));
+    lines.push(
+      ...diffEvaluations(best.evaluation, alternative.evaluation).map((diff) =>
+        // "worse" is a letter shorter than "better", so it is padded out: the
+        // details then start in the same column and read as a list.
+        `  ${diff.name} ${formatDelta(diff.delta)}  ` +
+        `${(diff.better ? "better:" : "worse:").padEnd(7)} ${diff.detail}`
+      ),
+    );
+  }
+
+  return lines.join("\n");
+}
+
+/** A rejected play's headline: what it was worth, and what it cost to reject. */
+function describeRejected(best: RankedMove, alternative: RankedMove): string {
+  const margin = best.evaluation.score - alternative.evaluation.score;
+  // Ranked plays arrive best first, so the margin is normally positive; a tie
+  // broken the other way should still read as a sentence rather than a minus.
+  const verdict = margin >= 0
+    ? `chosen wins by ${margin.toFixed(2)}`
+    : `alternative wins by ${(-margin).toFixed(2)}`;
+
+  return `instead of ${describeSequence(alternative.sequence)}  ` +
+    `(${formatDelta(alternative.evaluation.score)} — ${verdict})`;
+}
+
 @customElement("backgammon-board")
 export class BackgammonBoard extends LitElement {
   /**
@@ -90,14 +151,14 @@ export class BackgammonBoard extends LitElement {
   /** Where the picked-up checker may go — highlighted on the board. */
   @state() private destinations: number[] = [];
 
-  /** The engine's explanation of Black's last play, printed verbatim. */
-  @state() private tutorText = "";
+  /** How the engine ranked the plays available for Black's last roll. */
+  @state() private tutorAdvice: Advice | null = null;
 
   /**
-   * The engine's explanation of how *White* should play the roll in hand, set
-   * by the Hint button and empty the rest of the time.
+   * How the engine would play the roll *White* is holding, set by the Hint
+   * button and cleared the rest of the time.
    */
-  @state() private hintText = "";
+  @state() private hintAdvice: Advice | null = null;
 
   /** What White has played so far this turn, in `13/7 8/7` notation. */
   @state() private humanMoveText = "";
@@ -154,7 +215,7 @@ export class BackgammonBoard extends LitElement {
     this.destinations = [];
     this.humanMoveText = "";
     // Advice about the previous roll is worse than no advice at all.
-    this.hintText = "";
+    this.hintAdvice = null;
 
     if (this.controller.hasLegalMoves()) {
       this.status = "Pick a checker.";
@@ -217,7 +278,7 @@ export class BackgammonBoard extends LitElement {
     this.controller.applyMove(from, to);
     this.selected = null;
     this.destinations = [];
-    this.hintText = "";
+    this.hintAdvice = null;
     this.humanMoveText = describeSequence({ moves: this.controller.turnMoves() });
 
     if (this.controller.winner() !== null) {
@@ -271,7 +332,11 @@ export class BackgammonBoard extends LitElement {
       this.controller.legalDestinations(move.from).includes(move.to)
     );
 
-    this.hintText = describeChoice(before, WHITE, roll, TUTOR_ALTERNATIVES);
+    this.hintAdvice = {
+      player: WHITE,
+      roll,
+      moves: explainMove(before, WHITE, roll, TUTOR_ALTERNATIVES),
+    };
     this.selected = suggested ? suggested.from : null;
     this.destinations = suggested ? [suggested.to] : [];
     if (suggested) this.status = "Here's a suggested play — try it or pick your own.";
@@ -299,7 +364,11 @@ export class BackgammonBoard extends LitElement {
     const before = cloneBoard(this.controller.board());
     const sequence = chooseMove(before, BLACK, roll);
 
-    this.tutorText = describeChoice(before, BLACK, roll, TUTOR_ALTERNATIVES);
+    this.tutorAdvice = {
+      player: BLACK,
+      roll,
+      moves: explainMove(before, BLACK, roll, TUTOR_ALTERNATIVES),
+    };
     this.blackMoveText = sequence ? describeSequence(sequence) : "(no legal move)";
     if (sequence) this.controller.playSequence(sequence);
 
@@ -326,8 +395,8 @@ export class BackgammonBoard extends LitElement {
     this.controller = new TurnController();
     this.selected = null;
     this.destinations = [];
-    this.tutorText = "";
-    this.hintText = "";
+    this.tutorAdvice = null;
+    this.hintAdvice = null;
     this.humanMoveText = "";
     this.blackMoveText = "";
     this.thinking = false;
@@ -552,19 +621,19 @@ export class BackgammonBoard extends LitElement {
    * thinking.
    */
   private renderHint(): TemplateResult | typeof nothing {
-    if (!this.hintText) return nothing;
+    if (this.hintAdvice === null) return nothing;
 
     return html`
       <section class="tutor hint">
         <h2>Hint: how I would play it</h2>
-        <pre class="tutor-text hint-text">${this.hintText}</pre>
+        <pre class="tutor-text hint-text">${describeAdvice(this.hintAdvice)}</pre>
       </section>
     `;
   }
 
   /**
-   * The tutor panel: the engine's own explanation of Black's last play,
-   * printed exactly as `describeChoice` produced it.
+   * The tutor panel: the engine's own explanation of Black's last play, in the
+   * same format the hint panel uses for White's.
    */
   private renderTutor(): TemplateResult {
     return html`
@@ -578,8 +647,9 @@ export class BackgammonBoard extends LitElement {
             ? html`<p><strong>Black:</strong> <code>${this.blackMoveText}</code></p>`
             : nothing}
         </div>
-        <pre class="tutor-text">${this.tutorText ||
-          "Black has not moved yet. Once it does, the engine's reasoning appears here: the play it chose, the plays it rejected, and the score behind each."}</pre>
+        <pre class="tutor-text">${this.tutorAdvice
+          ? describeAdvice(this.tutorAdvice)
+          : "Black has not moved yet. Once it does, the engine's reasoning appears here: the play it chose, the plays it rejected, and the score behind each."}</pre>
       </section>
     `;
   }

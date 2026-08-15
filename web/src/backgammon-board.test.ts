@@ -11,11 +11,12 @@
  * only in the element, so they are pinned down here.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { chooseMove } from "../../engine/ai.ts";
+import { chooseMove, explainMove } from "../../engine/ai.ts";
 import { initialBoard, makeBoard } from "../../engine/board.ts";
 import { describeSequence } from "../../engine/moves.ts";
-import { type Board, type Roll, WHITE } from "../../engine/types.ts";
+import { BLACK, type Board, type Roll, WHITE } from "../../engine/types.ts";
 import { BackgammonBoard } from "./backgammon-board.ts";
+import { diffEvaluations } from "./compare.ts";
 import { TurnController } from "./controller.ts";
 
 /** Mounts a fresh board and waits for its first render. */
@@ -93,6 +94,7 @@ async function pickUpFirstChecker(element: BackgammonBoard): Promise<HTMLElement
 afterEach(() => {
   document.body.innerHTML = "";
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 describe("<backgammon-board>", () => {
@@ -269,6 +271,19 @@ describe("the hint button", () => {
     expect(controlButton(element, ".hint-button").disabled).toBe(true);
   });
 
+  it("compares the play it recommends against the ones it rejected", async () => {
+    const element = await mountWithRoll(initialBoard(), OPENING_ROLL);
+
+    controlButton(element, ".hint-button").click();
+    await element.updateComplete;
+
+    const [first] = alternativeBlocks(shadow(element, ".hint-text").textContent ?? "");
+    // 16/19 18/19 makes the five point; 11/14 14/15 makes nothing and leaves a blot.
+    expect(first).toContain("instead of 11/14 14/15  (-1.60 — chosen wins by 7.50)");
+    expect(first).toContain("blots +3.00  better: ");
+    expect(first).toContain("made_points +2.00  better: ");
+  });
+
   it("is disabled once the game has been won", async () => {
     // White's last checker sits one pip from home; a 1 bears it off and wins.
     const finish = makeBoard({ points: { 23: 1, 0: -2 }, whiteOff: 14 });
@@ -280,5 +295,89 @@ describe("the hint button", () => {
 
     expect(shadow(element, ".banner").textContent).toContain("White wins");
     expect(controlButton(element, ".hint-button").disabled).toBe(true);
+  });
+});
+
+/**
+ * A position where White cannot move at all: a checker on the bar and Black
+ * holding all six entry points. Rolling therefore hands the dice straight to
+ * Black, which is the shortest honest route to a tutor panel with something in
+ * it — no checkers have to be pushed around first.
+ */
+function blockedWhite(): Board {
+  return makeBoard({
+    points: { 0: -2, 1: -2, 2: -2, 3: -2, 4: -2, 5: -2, 12: -3, 18: 6, 20: 4, 22: 4 },
+    whiteBar: 1,
+  });
+}
+
+/** The roll both sides get in the tutor tests. Black has several ways to play it. */
+const BLACK_ROLL: Roll = { a: 6, b: 5 };
+
+/** Longer than the element waits before Black moves. */
+const PAST_THINKING_TIME = 5000;
+
+/**
+ * Rolls for a blocked White and lets Black answer.
+ *
+ * Only the timers are faked; Lit schedules its renders on microtasks, which
+ * have to keep running or `updateComplete` would never settle.
+ */
+async function playBlackTurn(board: Board = blockedWhite()): Promise<BackgammonBoard> {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const element = await mountWithRoll(board, BLACK_ROLL);
+  vi.advanceTimersByTime(PAST_THINKING_TIME);
+  await element.updateComplete;
+  return element;
+}
+
+/** One block of text per rejected play, header line included. */
+function alternativeBlocks(text: string): string[] {
+  return text.split("instead of ").slice(1).map((block) => `instead of ${block}`);
+}
+
+describe("the tutor panel", () => {
+  it("invites the player to make a move before there is anything to explain", async () => {
+    const element = await mount();
+    expect(shadow(element, ".tutor-text").textContent).toContain("Black has not moved yet");
+  });
+
+  it("gives Black's chosen play its full breakdown", async () => {
+    const element = await playBlackTurn();
+    const text = shadow(element, ".tutor-text").textContent ?? "";
+    const best = explainMove(blockedWhite(), BLACK, BLACK_ROLL, 1)[0];
+
+    expect(text).toContain("Black rolls (6,5)");
+    expect(text).toContain(`plays ${describeSequence(best.sequence)}`);
+    expect(text).toContain("score +50.75");
+    // Every factor, whether or not it separates this play from the others.
+    for (const factor of best.evaluation.factors) {
+      expect(text.split("instead of ")[0]).toContain(`${factor.name}: `);
+    }
+  });
+
+  it("reduces each rejected play to what it did differently", async () => {
+    const element = await playBlackTurn();
+    const [first] = alternativeBlocks(shadow(element, ".tutor-text").textContent ?? "");
+
+    expect(first).toContain("instead of 12/6 12/7  (+42.00 — chosen wins by 8.75)");
+    expect(first).toContain("blots +6.75  better: blots none against none");
+    expect(first).toContain("made_points +2.00  better: ");
+  });
+
+  it("says nothing about the factors the two plays agree on", async () => {
+    const element = await playBlackTurn();
+    const [first] = alternativeBlocks(shadow(element, ".tutor-text").textContent ?? "");
+
+    const ranked = explainMove(blockedWhite(), BLACK, BLACK_ROLL, 2);
+    const changed = diffEvaluations(ranked[0].evaluation, ranked[1].evaluation)
+      .map((diff) => diff.name);
+    const unchanged = ranked[0].evaluation.factors
+      .map((factor) => factor.name)
+      .filter((name) => !changed.includes(name));
+
+    expect(changed.length).toBeGreaterThan(0);
+    expect(unchanged.length).toBeGreaterThan(0);
+    for (const name of unchanged) expect(first).not.toContain(name);
   });
 });
