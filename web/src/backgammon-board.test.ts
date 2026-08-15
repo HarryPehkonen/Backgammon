@@ -10,7 +10,7 @@
  * half-picked-up checker back, and asking the engine for a hint. Those live
  * only in the element, so they are pinned down here.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, type Mock, vi } from "vitest";
 import { chooseMove, explainMove } from "../../engine/ai.ts";
 import { initialBoard, makeBoard } from "../../engine/board.ts";
 import { describeSequence } from "../../engine/moves.ts";
@@ -91,9 +91,23 @@ async function pickUpFirstChecker(element: BackgammonBoard): Promise<HTMLElement
   return source;
 }
 
+/**
+ * Answers the question the element asks before it throws a game away.
+ *
+ * happy-dom has no `confirm` of its own, so this is a definition rather than
+ * an override — an unstubbed call would be a TypeError, which is exactly the
+ * failure a test wants if the guard fires when it should not.
+ */
+function stubConfirm(answer: boolean): Mock {
+  const confirm = vi.fn(() => answer);
+  vi.stubGlobal("confirm", confirm);
+  return confirm;
+}
+
 afterEach(() => {
   document.body.innerHTML = "";
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   vi.useRealTimers();
 });
 
@@ -379,5 +393,111 @@ describe("the tutor panel", () => {
     expect(changed.length).toBeGreaterThan(0);
     expect(unchanged.length).toBeGreaterThan(0);
     for (const name of unchanged) expect(first).not.toContain(name);
+  });
+});
+
+/** What the element asks before it abandons a game in progress. */
+const END_GAME_PROMPT = "Are you sure you want to end this game?";
+
+describe("starting a new game", () => {
+  it("resets a board nobody has played on without asking", async () => {
+    const confirm = stubConfirm(true);
+    const element = await mount();
+
+    controlButton(element, ".new-game").click();
+    await element.updateComplete;
+
+    expect(confirm).not.toHaveBeenCalled();
+    expect(status(element)).toBe("Your roll.");
+    expect(shadowAll(element, ".checker")).toHaveLength(30);
+  });
+
+  it("asks once the dice have been thrown", async () => {
+    const confirm = stubConfirm(true);
+    const element = await mountWithRoll(initialBoard(), OPENING_ROLL);
+
+    controlButton(element, ".new-game").click();
+    await element.updateComplete;
+
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(confirm).toHaveBeenCalledWith(END_GAME_PROMPT);
+  });
+
+  it("changes nothing when the player says no", async () => {
+    const confirm = stubConfirm(false);
+    const element = await mountWithRoll(initialBoard(), OPENING_ROLL);
+    await pickUpFirstChecker(element);
+
+    controlButton(element, ".new-game").click();
+    await element.updateComplete;
+
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(shadowAll(element, ".die")).toHaveLength(2);
+    expect(shadowAll(element, ".no-dice")).toHaveLength(0);
+    expect(status(element)).toBe("Now pick where it goes.");
+    // Even the half-made move is still in hand.
+    expect(shadowAll(element, ".selected")).toHaveLength(1);
+  });
+
+  it("resets when the player says yes", async () => {
+    stubConfirm(true);
+    const element = await mountWithRoll(initialBoard(), OPENING_ROLL);
+
+    controlButton(element, ".new-game").click();
+    await element.updateComplete;
+
+    expect(status(element)).toBe("Your roll.");
+    expect(shadowAll(element, ".no-dice")).toHaveLength(1);
+    expect(shadowAll(element, ".die")).toHaveLength(0);
+    expect(shadowAll(element, ".checker")).toHaveLength(30);
+  });
+
+  it("asks after a move has been played", async () => {
+    const confirm = stubConfirm(false);
+    const element = await mountWithRoll(initialBoard(), OPENING_ROLL);
+    await pickUpFirstChecker(element);
+    (shadowAll(element, ".point.target")[0] as HTMLElement).click();
+    await element.updateComplete;
+
+    const played = shadow(element, ".moves").textContent ?? "";
+    expect(played).toContain("You:");
+
+    controlButton(element, ".new-game").click();
+    await element.updateComplete;
+
+    expect(confirm).toHaveBeenCalledWith(END_GAME_PROMPT);
+    expect(shadow(element, ".moves").textContent).toBe(played);
+  });
+
+  it("asks while Black is thinking", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const confirm = stubConfirm(false);
+    // White is blocked, so the roll hands straight over and Black is thinking.
+    const element = await mountWithRoll(blockedWhite(), BLACK_ROLL);
+    expect(internals(element).thinking).toBe(true);
+
+    controlButton(element, ".new-game").click();
+    await element.updateComplete;
+
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(internals(element).thinking).toBe(true);
+  });
+
+  it("asks even though the game is over", async () => {
+    // White's last checker sits one pip from home; a 1 bears it off and wins.
+    const finish = makeBoard({ points: { 23: 1, 0: -2 }, whiteOff: 14 });
+    const confirm = stubConfirm(false);
+    const element = await mountWithRoll(finish, { a: 1, b: 1 });
+
+    await pickUpFirstChecker(element);
+    shadow(element, ".tray.target").click();
+    await element.updateComplete;
+    expect(shadow(element, ".banner").textContent).toContain("White wins");
+
+    controlButton(element, ".new-game").click();
+    await element.updateComplete;
+
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(shadow(element, ".banner").textContent).toContain("White wins");
   });
 });

@@ -176,6 +176,16 @@ export class BackgammonBoard extends LitElement {
   private aiTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
+   * Whether there is a game here worth losing — true from the first roll until
+   * a new game is started, a won game included.
+   *
+   * It is a flag rather than something read off the controller because the
+   * roll is cleared at every handover, and a game between turns is still a
+   * game. Nothing is drawn from it, so it is not reactive.
+   */
+  private started = false;
+
+  /**
    * Escape puts a picked-up checker back down.
    *
    * It listens on the window rather than on the element because a player who
@@ -211,6 +221,7 @@ export class BackgammonBoard extends LitElement {
     if (!this.humanCanAct || this.controller.currentRoll() !== null) return;
 
     this.controller.roll();
+    this.started = true;
     this.selected = null;
     this.destinations = [];
     this.humanMoveText = "";
@@ -390,8 +401,17 @@ export class BackgammonBoard extends LitElement {
     this.aiTimer = null;
   }
 
+  /**
+   * Starts again — but a game in progress is thrown away only on purpose. The
+   * button stays live while Black is thinking, so the question covers a
+   * mis-click there too. An untouched board has nothing to lose and is reset
+   * without a word.
+   */
   private onNewGame(): void {
+    if (this.started && !window.confirm("Are you sure you want to end this game?")) return;
+
     this.cancelAiTurn();
+    this.started = false;
     this.controller = new TurnController();
     this.selected = null;
     this.destinations = [];
