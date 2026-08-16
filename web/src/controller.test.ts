@@ -318,6 +318,73 @@ describe("handing the dice over", () => {
   });
 });
 
+describe("playMove", () => {
+  /*
+   * `applyMove` re-derives the die from a pair of endpoints, which is the
+   * right thing for a mouse and the wrong thing for the engine: the engine has
+   * already decided which die each of its moves spends. `playMove` plays that
+   * decision verbatim, which is what lets the UI animate a turn move by move
+   * without the animation quietly changing the play.
+   */
+  it("plays one engine move and spends its die", () => {
+    const controller = positionWith(initialBoard(), { a: 3, b: 1 }, BLACK);
+    const sequence = chooseMove(controller.board(), BLACK, { a: 3, b: 1 })!;
+    const [first] = sequence.moves;
+
+    controller.playMove(first);
+
+    const left = diceFromRoll({ a: 3, b: 1 });
+    left.splice(left.indexOf(first.die), 1);
+
+    expect(controller.turnMoves()).toEqual([first]);
+    expect(controller.remainingDice()).toEqual(left);
+    // The same move clicked by hand reaches the same position.
+    const clicked = positionWith(initialBoard(), { a: 3, b: 1 }, BLACK);
+    clicked.applyMove(first.from, first.to);
+    expect(boardKey(controller.board())).toBe(boardKey(clicked.board()));
+  });
+
+  it("plays a whole turn one move at a time", () => {
+    const controller = positionWith(initialBoard(), { a: 3, b: 1 }, BLACK);
+    const sequence = chooseMove(controller.board(), BLACK, { a: 3, b: 1 })!;
+    expect(sequence.moves.length).toBeGreaterThan(1);
+
+    const wholeTurn = positionWith(initialBoard(), { a: 3, b: 1 }, BLACK);
+    wholeTurn.playSequence(sequence);
+
+    for (const move of sequence.moves) controller.playMove(move);
+
+    expect(boardKey(controller.board())).toBe(boardKey(wholeTurn.board()));
+    expect(controller.turnMoves()).toEqual(sequence.moves);
+    expect(controller.remainingDice()).toEqual([]);
+    expect(controller.isTurnOver()).toBe(true);
+  });
+
+  it("spends the die the engine chose, not the smallest that fits", () => {
+    // White's last two checkers, one and two pips from home, with a 6-2 to
+    // play. Either die bears the back checker off — the 2 exactly, the 6 as an
+    // oversized roll — so the endpoints alone do not say which was meant.
+    const bearOff = () =>
+      positionWith(
+        makeBoard({ points: { 23: 1, 22: 1, 0: -2 }, whiteOff: 13 }),
+        { a: 6, b: 2 },
+      );
+    const sequence = chooseMove(bearOff().board(), WHITE, { a: 6, b: 2 })!;
+    const [first] = sequence.moves;
+    expect(first).toEqual({ from: 22, to: OFF, die: 6, player: WHITE });
+
+    const played = bearOff();
+    played.playMove(first);
+    expect(played.remainingDice()).toEqual([2]);
+
+    // Clicked by hand the same bear-off spends the exact die instead, which is
+    // right for a player and would misreport what the engine actually did.
+    const clicked = bearOff();
+    clicked.applyMove(22, OFF);
+    expect(clicked.remainingDice()).toEqual([6]);
+  });
+});
+
 describe("a whole game", () => {
   /*
    * The turn loop the component drives, run to completion with the engine

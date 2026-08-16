@@ -53,6 +53,16 @@ import {
 /** How long Black appears to think before playing, in milliseconds. */
 const AI_THINKING_TIME = 600;
 
+/**
+ * How long each half of one animated move lasts, in milliseconds: first the
+ * point lights up, then the checker arrives. Long enough to follow, short
+ * enough that a four-move double does not become a wait.
+ */
+const MOVE_ANIMATION_MS = 380;
+
+/** A promise that keeps the animation waiting. */
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 /** How many alternative plays the tutor panel compares against Black's choice. */
 const TUTOR_ALTERNATIVES = 3;
 
@@ -172,8 +182,25 @@ export class BackgammonBoard extends LitElement {
   /** True while Black's move is pending, so the board stops taking clicks. */
   @state() private thinking = false;
 
+  /**
+   * The two ends of the move Black is playing right now, both lit up, or null
+   * when nothing is moving.
+   */
+  @state() private flash: { from: number; to: number } | null = null;
+
   /** Handle for the pending AI move, cleared if the element goes away. */
   private aiTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Which run of Black's turn is the live one.
+   *
+   * The animation is a sequence of awaits, so unlike a `setTimeout` it cannot
+   * simply be cleared: a half-finished turn is already suspended somewhere in
+   * the middle of itself. Every cancellation bumps this counter, and a run
+   * that finds it changed abandons the rest of its moves rather than playing
+   * them into a game that has since been replaced.
+   */
+  private aiToken = 0;
 
   /**
    * Whether there is a game here worth losing — true from the first roll until
@@ -363,13 +390,18 @@ export class BackgammonBoard extends LitElement {
   }
 
   /**
-   * Black's whole turn: roll, choose, explain, play.
+   * Black's whole turn: roll, choose, explain, then play it one move at a
+   * time so the player can see it happen.
    *
    * The explanation has to be built from the position *before* the move, since
-   * it is a comparison of the plays that were available at that moment.
+   * it is a comparison of the plays that were available at that moment. The
+   * moves are played individually rather than as a sequence for the same
+   * reason a person moves one checker at a time: a turn that arrives all at
+   * once is a turn nobody watched.
    */
-  private playBlackTurn(): void {
+  private async playBlackTurn(): Promise<void> {
     this.aiTimer = null;
+    const run = ++this.aiToken;
 
     const roll = this.controller.roll();
     const before = cloneBoard(this.controller.board());
@@ -381,8 +413,20 @@ export class BackgammonBoard extends LitElement {
       moves: explainMove(before, BLACK, roll, TUTOR_ALTERNATIVES),
     };
     this.blackMoveText = sequence ? describeSequence(sequence) : "(no legal move)";
-    if (sequence) this.controller.playSequence(sequence);
 
+    for (const move of sequence?.moves ?? []) {
+      // Light the move up first, so the eye is already where the checker is
+      // about to leave from, and only then move it.
+      this.flash = { from: move.from, to: move.to };
+      this.requestUpdate();
+      if (!await this.pause(run)) return;
+
+      this.controller.playMove(move);
+      this.requestUpdate();
+      if (!await this.pause(run)) return;
+    }
+
+    this.flash = null;
     this.thinking = false;
 
     if (this.controller.winner() !== null) {
@@ -396,9 +440,32 @@ export class BackgammonBoard extends LitElement {
     this.requestUpdate();
   }
 
+  /**
+   * Waits out one half of a move, and reports whether the turn it belongs to
+   * is still the live one. False means the game moved on and the rest of the
+   * turn must not be played.
+   */
+  private async pause(run: number): Promise<boolean> {
+    await sleep(this.animationTime);
+    return this.aiToken === run;
+  }
+
+  /**
+   * How long each step of the animation lasts — nothing at all for a player
+   * who has asked their system to stop moving things about, who then gets the
+   * old instantaneous behaviour back.
+   */
+  private get animationTime(): number {
+    return window.matchMedia("(prefers-reduced-motion: reduce)").matches
+      ? 0
+      : MOVE_ANIMATION_MS;
+  }
+
   private cancelAiTurn(): void {
     if (this.aiTimer !== null) clearTimeout(this.aiTimer);
     this.aiTimer = null;
+    // Anything already mid-animation belongs to a game that is over now.
+    this.aiToken++;
   }
 
   /**
@@ -420,6 +487,7 @@ export class BackgammonBoard extends LitElement {
     this.humanMoveText = "";
     this.blackMoveText = "";
     this.thinking = false;
+    this.flash = null;
     this.status = "Your roll.";
     this.requestUpdate();
   }
@@ -462,6 +530,15 @@ export class BackgammonBoard extends LitElement {
     `;
   }
 
+  /**
+   * Whether a slot is one of the two ends of the move being played right now.
+   * {@link BAR} and {@link OFF} answer this as well as an ordinary point, so
+   * a checker being hit or borne off lights up like any other move.
+   */
+  private touchedByFlash(slot: number): boolean {
+    return this.flash?.from === slot || this.flash?.to === slot;
+  }
+
   private renderPoint(point: number, sources: number[]): TemplateResult {
     const { x, y, rotation } = pointPosition(point);
     const stack = checkerStack(this.controller.board(), point);
@@ -473,6 +550,7 @@ export class BackgammonBoard extends LitElement {
       selected: this.selected === point,
       target: this.destinations.includes(point),
       pickable: sources.includes(point),
+      flash: this.touchedByFlash(point),
     };
 
     return html`
@@ -502,9 +580,14 @@ export class BackgammonBoard extends LitElement {
       pickable: sources.includes(BAR),
     };
 
+    // The bar lights up as a whole: a checker entering from it and a checker
+    // sent to it are both moves that happen there, and the halves are too
+    // narrow to tell apart at a glance anyway.
+    const barClasses = { bar: true, flash: this.touchedByFlash(BAR) };
+
     return html`
       <div
-        class="bar"
+        class=${classMap(barClasses)}
         style="grid-column: ${BAR_COLUMN}; grid-row: ${TOP_ROW} / ${BOTTOM_ROW + 1};"
       >
         <div class="bar-slot">${this.renderStack(checkerStack(board, BLACK_BAR), true)}</div>
@@ -528,6 +611,8 @@ export class BackgammonBoard extends LitElement {
     const classes = {
       tray: true,
       target: mine && this.destinations.includes(OFF),
+      // Only Black's tray ever animates, since only Black's moves do.
+      flash: player === BLACK && this.touchedByFlash(OFF),
     };
 
     return html`
@@ -866,9 +951,52 @@ export class BackgammonBoard extends LitElement {
       }
     }
 
+    /* Black's move, as it happens: both ends of it glow for a moment, and the
+       checkers on them brighten so the eye follows the checker rather than
+       the woodwork. */
+    .point.flash .triangle,
+    .bar.flash,
+    .tray.flash {
+      animation: moveFlash 0.38s ease-in-out;
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+    }
+
+    .point.flash .checker,
+    .bar.flash .checker,
+    .tray.flash .checker {
+      animation: checkerFlash 0.38s ease-in-out;
+    }
+
+    @keyframes moveFlash {
+      0%,
+      100% {
+        filter: brightness(1);
+      }
+      50% {
+        filter: brightness(1.6);
+      }
+    }
+
+    @keyframes checkerFlash {
+      0%,
+      100% {
+        box-shadow: 0 1px 2px #0008;
+      }
+      50% {
+        box-shadow: 0 0 10px 3px rgba(255, 209, 102, 0.8);
+      }
+    }
+
     @media (prefers-reduced-motion: reduce) {
       .point.target,
-      .tray.target {
+      .tray.target,
+      .point.flash .triangle,
+      .bar.flash,
+      .tray.flash,
+      .point.flash .checker,
+      .bar.flash .checker,
+      .tray.flash .checker {
         animation: none;
       }
     }

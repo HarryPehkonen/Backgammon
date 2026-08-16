@@ -302,13 +302,27 @@ export class TurnController {
   }
 
   /**
+   * Plays one move the engine has already chosen, exactly as chosen.
+   *
+   * This is {@link applyMove}'s opposite number. A move clicked on the board
+   * arrives as two endpoints and its die has to be worked back out; a move
+   * that came from the engine already knows which die it spends, and a
+   * bear-off is the case where the two can disagree — an oversized roll takes
+   * a checker off from the same point an exact one would. Playing the turn
+   * move by move, as the animation does, must not quietly re-decide that.
+   */
+  playMove(move: Move): void {
+    this.#play(move);
+  }
+
+  /**
    * Plays a whole turn the engine has already chosen, without re-checking it.
    *
    * This is how the AI moves: `chooseMove` only ever returns turns it drew
    * from `legalMoves`, so re-validating them here would be busywork.
    */
   playSequence(sequence: MoveSequence): void {
-    for (const move of sequence.moves) this.#play(move);
+    for (const move of sequence.moves) this.playMove(move);
   }
 
   /** Passes the dice to the other player and clears the turn. */

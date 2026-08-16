@@ -37,6 +37,7 @@ async function mount(): Promise<BackgammonBoard> {
 interface Internals {
   controller: TurnController;
   thinking: boolean;
+  flash: { from: number; to: number } | null;
 }
 
 function internals(element: BackgammonBoard): Internals {
@@ -340,7 +341,9 @@ const PAST_THINKING_TIME = 5000;
 async function playBlackTurn(board: Board = blockedWhite()): Promise<BackgammonBoard> {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   const element = await mountWithRoll(board, BLACK_ROLL);
-  vi.advanceTimersByTime(PAST_THINKING_TIME);
+  // Asynchronously, because Black plays its move one checker at a time and
+  // each step waits on a timer of its own.
+  await vi.advanceTimersByTimeAsync(PAST_THINKING_TIME);
   await element.updateComplete;
   return element;
 }
@@ -393,6 +396,118 @@ describe("the tutor panel", () => {
     expect(changed.length).toBeGreaterThan(0);
     expect(unchanged.length).toBeGreaterThan(0);
     for (const name of unchanged) expect(first).not.toContain(name);
+  });
+});
+
+/** Past the moment Black stops thinking, but not past its first move. */
+const INTO_THE_ANIMATION = 700;
+
+/**
+ * Answers the reduced-motion question for the element.
+ *
+ * happy-dom's own `matchMedia` says "no preference" to everything, which is
+ * the animated case; a player who has asked their system to calm down gets
+ * this instead.
+ */
+function stubReducedMotion(): void {
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches: query.includes("prefers-reduced-motion"),
+    media: query,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }));
+}
+
+describe("watching Black move", () => {
+  it("lights up each move it is about to play", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const element = await mountWithRoll(blockedWhite(), BLACK_ROLL);
+    expect(internals(element).flash).toBeNull();
+
+    await vi.advanceTimersByTimeAsync(INTO_THE_ANIMATION);
+    await element.updateComplete;
+
+    // Mid-turn: something on the board is glowing and the dice are still
+    // Black's, so the player cannot reach in and touch anything.
+    expect(internals(element).flash).not.toBeNull();
+    expect(internals(element).thinking).toBe(true);
+    expect(shadowAll(element, ".flash").length).toBeGreaterThan(0);
+    expect(shadowAll(element, ".point.pickable")).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(PAST_THINKING_TIME);
+    await element.updateComplete;
+
+    expect(internals(element).flash).toBeNull();
+    expect(shadowAll(element, ".flash")).toHaveLength(0);
+    expect(internals(element).thinking).toBe(false);
+    expect(status(element)).toBe("Your roll.");
+  });
+
+  it("plays the moves one at a time rather than all at once", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const element = await mountWithRoll(blockedWhite(), BLACK_ROLL);
+    const controller = internals(element).controller;
+    const sequence = chooseMove(blockedWhite(), BLACK, BLACK_ROLL)!;
+    expect(sequence.moves.length).toBeGreaterThan(1);
+
+    // The point is lit before its checker moves, so the player sees where the
+    // move is going to come from.
+    await vi.advanceTimersByTimeAsync(INTO_THE_ANIMATION);
+    expect(internals(element).flash).toEqual({
+      from: sequence.moves[0].from,
+      to: sequence.moves[0].to,
+    });
+    expect(controller.turnMoves()).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(400);
+    expect(controller.turnMoves()).toEqual([sequence.moves[0]]);
+
+    await vi.advanceTimersByTimeAsync(PAST_THINKING_TIME);
+    await element.updateComplete;
+    expect(controller.player()).toBe(WHITE);
+  });
+
+  it("plays instantly for a player who asked for less motion", async () => {
+    stubReducedMotion();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const element = await mountWithRoll(blockedWhite(), BLACK_ROLL);
+
+    // The same moment that finds the animated board mid-flash finds this one
+    // finished: only the thinking pause is left.
+    await vi.advanceTimersByTimeAsync(INTO_THE_ANIMATION);
+    await element.updateComplete;
+
+    expect(internals(element).flash).toBeNull();
+    expect(internals(element).thinking).toBe(false);
+    expect(status(element)).toBe("Your roll.");
+    expect(shadow(element, ".moves").textContent).toContain("Black:");
+  });
+
+  it("abandons a half-played turn when a new game is started", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    stubConfirm(true);
+    const element = await mountWithRoll(blockedWhite(), BLACK_ROLL);
+
+    await vi.advanceTimersByTimeAsync(INTO_THE_ANIMATION);
+    await element.updateComplete;
+    expect(internals(element).flash).not.toBeNull();
+
+    controlButton(element, ".new-game").click();
+    await element.updateComplete;
+    const fresh = internals(element).controller;
+
+    // The abandoned turn must not carry on playing Black's moves into the
+    // board that replaced it.
+    await vi.advanceTimersByTimeAsync(PAST_THINKING_TIME);
+    await element.updateComplete;
+
+    expect(internals(element).controller).toBe(fresh);
+    expect(fresh.turnMoves()).toEqual([]);
+    expect(fresh.player()).toBe(WHITE);
+    expect(internals(element).flash).toBeNull();
+    expect(shadowAll(element, ".flash")).toHaveLength(0);
+    expect(shadowAll(element, ".checker")).toHaveLength(30);
+    expect(status(element)).toBe("Your roll.");
   });
 });
 
